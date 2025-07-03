@@ -4,6 +4,7 @@ import io
 import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+import os
 
 import numpy as np
 import pycolmap
@@ -71,7 +72,6 @@ def import_features(
         keypoints = get_keypoints(features_path, image_name)
         keypoints += 0.5  # COLMAP origin
         db.add_keypoints(image_id, keypoints)
-
     db.commit()
     db.close()
 
@@ -101,7 +101,6 @@ def import_matches(
             matches = matches[scores > min_match_score]
         db.add_matches(id0, id1, matches)
         matched |= {(id0, id1), (id1, id0)}
-
         if skip_geometric_verification:
             db.add_two_view_geometry(id0, id1, matches)
 
@@ -110,17 +109,12 @@ def import_matches(
 
 
 def estimation_and_geometric_verification(
-    database_path: Path, pairs_path: Path, verbose: bool = False
+    database_path: Path, pairs_path: Path, verbose: bool = False, max_error=4.0
 ):
     logger.info("Performing geometric verification of the matches...")
-    with OutputCapture(verbose):
-        with pycolmap.ostream():
-            pycolmap.verify_matches(
-                database_path,
-                pairs_path,
-                options=dict(ransac=dict(max_num_trials=20000, min_inlier_ratio=0.1)),
-            )
-
+    with OutputCapture(True):
+        with pycolmap.ostream():   
+            pycolmap.verify_matches(  database_path,pairs_path,     options=dict(ransac=dict(max_error=max_error, max_num_trials=20000, min_inlier_ratio=0.1)), )
 
 def geometric_verification(
     image_ids: Dict[str, int],
@@ -200,17 +194,58 @@ def run_triangulation(
     image_dir: Path,
     reference_model: pycolmap.Reconstruction,
     verbose: bool = False,
-    options: Optional[Dict[str, Any]] = None,
+    options: Optional[Any] = None,
 ) -> pycolmap.Reconstruction:
+
     model_path.mkdir(parents=True, exist_ok=True)
     logger.info("Running 3D triangulation...")
-    if options is None:
-        options = {}
-    with OutputCapture(verbose):
-        with pycolmap.ostream():
-            reconstruction = pycolmap.triangulate_points(
-                reference_model, database_path, image_dir, model_path, options=options
-            )
+
+
+    if pycolmap.__version__.startswith("3."):
+        default_options = pycolmap.IncrementalPipelineOptions()
+        """
+        {'ImageReader_camera_mode': 'auto', 'ImageReader_single_camera': False, 'min_model_size': 6, 'no_refine_intrinsics': True, 'n_threads': 16, 
+        'use_pba': False, 'geometry_verify_thr': 12.0, 
+        'reregistration': {'abs_pose_max_error': 12, 'abs_pose_min_num_inliers': 30, 'abs_pose_min_inlier_ratio': 0.25, 'filter_max_reproj_error': 5}, 
+        'colmap_mapper_cfgs': {'init_max_error': 12, 'abs_pose_max_error': 12, 'filter_max_reproj_error': 12, 'tri_merge_max_reproj_error': 12, 
+        'tri_complete_max_reproj_error': 12, 'tri_ignore_two_view_tracks': 1}}
+        """        
+        # From dict input to pycolmap's incrementalmapperoptions
+        for key, value in options.items():
+            if hasattr(default_options, key):  # 속성이 존재하는 경우만
+                setattr(default_options, key, value)
+
+        for key, value in options['colmap_mapper_cfgs'].items():
+            if str(key).startswith("tri_"):
+                key = str(key)[4:]
+            if hasattr(default_options.triangulation, key):
+                setattr(default_options.triangulation, key, value)
+
+            if hasattr(default_options.mapper, key):
+                setattr(default_options.mapper, key, value)
+
+
+        options = default_options
+
+        with OutputCapture(verbose):
+            with pycolmap.ostream():
+                reconstruction = pycolmap.triangulate_points(
+                    reference_model, database_path, image_dir, model_path, options=options
+                )
+
+
+    elif pycolmap.__version__.startswith("0.6"):
+        if options is None:
+            options = {}
+        with OutputCapture(verbose):
+            with pycolmap.ostream():
+                reconstruction = pycolmap.triangulate_points(
+                    reference_model, database_path, image_dir, model_path, options=options
+                )
+    else:
+        ValueError("Not implemented on this PYCOLMAP version.")
+
+
     return reconstruction
 
 
@@ -225,7 +260,7 @@ def main(
     estimate_two_view_geometries: bool = False,
     min_match_score: Optional[float] = None,
     verbose: bool = False,
-    mapper_options: Optional[Dict[str, Any]] = None,
+    mapper_options: Optional[Any] = None,
 ) -> pycolmap.Reconstruction:
     assert reference_model.exists(), reference_model
     assert features.exists(), features
@@ -234,6 +269,11 @@ def main(
 
     sfm_dir.mkdir(parents=True, exist_ok=True)
     database = sfm_dir / "database.db"
+
+    # making '0' in sfm_dir for consistency
+    sfm_dir = sfm_dir / "0"
+    sfm_dir.mkdir(parents=True, exist_ok=True)
+
     reference = pycolmap.Reconstruction(reference_model)
 
     image_ids = create_db_from_model(reference, database)
@@ -246,13 +286,25 @@ def main(
         min_match_score,
         skip_geometric_verification,
     )
+
+    from pdb import set_trace as bb
     if not skip_geometric_verification:
+        max_error = 4.0
+        
+        try:
+            if 'geometry_verify_thr' in mapper_options.keys():
+                max_error = mapper_options['geometry_verify_thr']
+        except:
+            max_error=4.0
+        """
         if estimate_two_view_geometries:
             estimation_and_geometric_verification(database, pairs, verbose)
         else:
-            geometric_verification(
-                image_ids, reference, database, features, pairs, matches
-            )
+        """
+        geometric_verification(
+            image_ids, reference, database, features, pairs, matches, max_error=max_error
+        )
+
     reconstruction = run_triangulation(
         sfm_dir, database, image_dir, reference, verbose, mapper_options
     )
@@ -302,5 +354,4 @@ if __name__ == "__main__":
     mapper_options = parse_option_args(
         args.pop("mapper_options"), pycolmap.IncrementalMapperOptions()
     )
-
     main(**args, mapper_options=mapper_options)

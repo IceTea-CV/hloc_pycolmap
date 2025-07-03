@@ -33,6 +33,8 @@ def list_h5_names(path):
     return list(set(names))
 
 
+# Below Existing
+"""
 def get_keypoints(
     path: Path, name: str, return_uncertainty: bool = False
 ) -> np.ndarray:
@@ -70,9 +72,33 @@ def get_matches(path: Path, name0: str, name1: str) -> Tuple[np.ndarray]:
         pair, reverse = find_pair(hfile, name0, name1)
         matches = hfile[pair]["matches0"].__array__()
         scores = hfile[pair]["matching_scores0"].__array__()
+    from pdb import set_trace as bb
+    bb()
     idx = np.where(matches != -1)[0]
     matches = np.stack([idx, matches[idx]], -1)
     if reverse:
         matches = np.flip(matches, -1)
     scores = scores[idx]
+    return matches, scores
+"""
+
+# Modified as simple as possible
+def get_keypoints(path: Path, name: str,
+                  return_uncertainty: bool = False) -> np.ndarray:
+    with h5py.File(str(path), 'r') as hfile:
+        dset = hfile[name]['keypoints']
+        p = dset.__array__()
+    if return_uncertainty:
+        return p, None
+    return p
+
+
+def find_pair(hfile: h5py.File, name0: str, name1: str):
+    return ' '.join([name0, name1]), False
+
+def get_matches(path: Path, name0: str, name1: str) -> Tuple[np.ndarray]:
+    with h5py.File(str(path), 'r', libver='latest') as hfile:
+        pair, reverse = find_pair(hfile, name0, name1)
+        matches = hfile[pair]['matches0'].__array__()
+        scores = np.ones((matches.shape[0],))
     return matches, scores

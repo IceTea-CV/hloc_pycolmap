@@ -3,8 +3,10 @@ import multiprocessing
 import shutil
 from pathlib import Path
 from typing import Any, Dict, List, Optional
-
+from pdb import set_trace as bb
 import pycolmap
+import os
+
 
 from . import logger
 from .triangulation import (
@@ -41,6 +43,7 @@ def import_images(
     images = list(image_dir.iterdir())
     if len(images) == 0:
         raise IOError(f"No images found in {image_dir}.")
+
     with pycolmap.ostream():
         pycolmap.import_images(
             database_path,
@@ -65,42 +68,79 @@ def run_reconstruction(
     database_path: Path,
     image_dir: Path,
     verbose: bool = False,
-    options: Optional[Dict[str, Any]] = None,
+    options: Optional[Any] = None,
 ) -> pycolmap.Reconstruction:
     models_path = sfm_dir / "models"
     models_path.mkdir(exist_ok=True, parents=True)
     logger.info("Running 3D reconstruction...")
+    
     if options is None:
         options = {}
-    options = {"num_threads": min(multiprocessing.cpu_count(), 16), **options}
-    with OutputCapture(verbose):
-        with pycolmap.ostream():
-            reconstructions = pycolmap.incremental_mapping(
+
+    dict_options = {"num_threads": min(multiprocessing.cpu_count(), 16), **options}
+    if pycolmap.__version__.startswith("3."):
+        default_options = pycolmap.IncrementalPipelineOptions()
+        # From dict input to pycolmap's incrementalmapperoptions
+        for key, value in dict_options.items():
+            if hasattr(default_options, key):  # if attributes exist
+                setattr(default_options, key, value)
+
+        for key, value in dict_options['colmap_mapper_cfgs'].items():
+            if str(key).startswith("tri_"):
+                key = str(key)[4:]
+            if hasattr(default_options.triangulation, key):
+                setattr(default_options.triangulation, key, value)
+
+            if hasattr(default_options.mapper, key):
+                setattr(default_options.mapper, key, value)
+
+
+        full_options = default_options
+
+        with OutputCapture(verbose):
+            with pycolmap.ostream():
+                reconstructions = pycolmap.incremental_mapping(
+                    database_path, image_dir, models_path, options=full_options
+                )
+
+    elif pycolmap.__version__.startswith("0.6"):
+        if options is None:
+            options = {}
+        with OutputCapture(verbose):
+            with pycolmap.ostream():
+                reconstructions = pycolmap.incremental_mapping(
                 database_path, image_dir, models_path, options=options
             )
+
+    else:
+        ValueError("Not implemented on this PYCOLMAP version.")
+
+
 
     if len(reconstructions) == 0:
         logger.error("Could not reconstruct any model!")
         return None
     logger.info(f"Reconstructed {len(reconstructions)} model(s).")
 
-    largest_index = None
+
+
+
     largest_num_images = 0
     for index, rec in reconstructions.items():
         num_images = rec.num_reg_images()
-        if num_images > largest_num_images:
-            largest_index = index
-            largest_num_images = num_images
-    assert largest_index is not None
-    logger.info(
-        f"Largest model is #{largest_index} " f"with {largest_num_images} images."
-    )
+        logger.info(
+            f"Model index #{index} has" f"{num_images} images."
+        )
+    
+    for index in range(len(reconstructions)):
+        for filename in ["images.bin", "cameras.bin", "points3D.bin"]:
+            if (sfm_dir / filename).exists():
+                (sfm_dir / filename).unlink()
+            os.makedirs(sfm_dir / str(index), exist_ok=True)
+            shutil.move(str(models_path / str(index) / filename), str(sfm_dir / str(index)))
+    shutil.rmtree(str(models_path))
 
-    for filename in ["images.bin", "cameras.bin", "points3D.bin"]:
-        if (sfm_dir / filename).exists():
-            (sfm_dir / filename).unlink()
-        shutil.move(str(models_path / str(largest_index) / filename), str(sfm_dir))
-    return reconstructions[largest_index]
+    return reconstructions
 
 
 def main(
@@ -115,7 +155,7 @@ def main(
     min_match_score: Optional[float] = None,
     image_list: Optional[List[str]] = None,
     image_options: Optional[Dict[str, Any]] = None,
-    mapper_options: Optional[Dict[str, Any]] = None,
+    mapper_options: Optional[Any] = None,
 ) -> pycolmap.Reconstruction:
     assert features.exists(), features
     assert pairs.exists(), pairs
@@ -137,16 +177,25 @@ def main(
         skip_geometric_verification,
     )
     if not skip_geometric_verification:
-        estimation_and_geometric_verification(database, pairs, verbose)
-    reconstruction = run_reconstruction(
+        max_error = 4.0        
+        try:
+            if 'geometry_verify_thr' in mapper_options.keys():
+                max_error = mapper_options['geometry_verify_thr']
+        except:
+            max_error=4.0
+
+        estimation_and_geometric_verification(database, pairs, verbose, max_error=max_error)
+    reconstruction_set = run_reconstruction(
         sfm_dir, database, image_dir, verbose, mapper_options
     )
-    if reconstruction is not None:
-        logger.info(
-            f"Reconstruction statistics:\n{reconstruction.summary()}"
-            + f"\n\tnum_input_images = {len(image_ids)}"
-        )
-    return reconstruction
+
+    for i in range(len(reconstruction_set)):
+        if reconstruction_set[i] is not None:
+            logger.info(
+                f"Reconstruction statistics:\n{reconstruction_set[i].summary()}"
+                + f"\n\tnum_input_images = {len(image_ids)}"
+            )
+    return reconstruction_set
 
 
 if __name__ == "__main__":
