@@ -10,6 +10,8 @@ import numpy as np
 from tqdm import tqdm
 import pycolmap
 import h5py
+from typing import Any, Dict, List, Optional
+
 
 from . import logger
 from .utils.database import COLMAPDatabase
@@ -89,40 +91,37 @@ def import_features(image_ids, database_path, features_path, verbose):
     db.close()
 
 
-def import_matches(image_ids, database_path, pairs_path, matches_path,
-                   min_match_score=None, skip_geometric_verification=False, verbose=True):
-    logger.info('Importing matches into the database...')
+def import_matches(
+    image_ids: Dict[str, int],
+    database_path: Path,
+    pairs_path: Path,
+    matches_path: Path,
+    min_match_score: Optional[float] = None,
+    skip_geometric_verification: bool = False,
+    verbose=True,
+):
+    logger.info("Importing matches into the database...")
 
-    with open(str(pairs_path), 'r') as f:
+    with open(str(pairs_path), "r") as f:
         pairs = [p.split() for p in f.readlines()]
 
     db = COLMAPDatabase.connect(database_path)
 
     matched = set()
-
-    with h5py.File(str(matches_path), 'r', libver='latest') as hfile:
-        for name0, name1 in tqdm(pairs, disable=not verbose):
-
-            id0, id1 = image_ids[name0], image_ids[name1]
-            if len({(id0, id1), (id1, id0)} & matched) > 0:
-                continue
-
-            # matches, scores = get_matches(matches_path, name0, name1) # This maybe slow due to constantly open file
-            pair = ' '.join([name0, name1])
-            matches = hfile[pair].__array__().T
-            scores = np.ones((matches.shape[0],))
-
-            if min_match_score:
-                matches = matches[scores > min_match_score]
-            db.add_matches(id0, id1, matches)
-            matched |= {(id0, id1), (id1, id0)}
-
-            if skip_geometric_verification:
-                db.add_two_view_geometry(id0, id1, matches)
+    for name0, name1 in tqdm(pairs):
+        id0, id1 = image_ids[name0], image_ids[name1]
+        if len({(id0, id1), (id1, id0)} & matched) > 0:
+            continue
+        matches, scores = get_matches(matches_path, name0, name1)
+        if min_match_score:
+            matches = matches[scores > min_match_score]
+        db.add_matches(id0, id1, matches)
+        matched |= {(id0, id1), (id1, id0)}
+        if skip_geometric_verification:
+            db.add_two_view_geometry(id0, id1, matches)
 
     db.commit()
     db.close()
-
 
 def estimation_and_geometric_verification(database_path, pairs_path,
                                           verbose=False, max_error=4.0):
